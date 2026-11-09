@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """네이버 금융뉴스 댓글수 기준 텔레그램 알림.
 
-News search: NAVER Search Open API (official).
+News search: NAVER API HUB Search (official; legacy endpoint optional).
 Comment count: NAVER news commentBox internal, unofficial (subject to change).
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ def article_ids(url: str) -> tuple[str, str] | None:
 def search_news(session: requests.Session, config: dict, client_id: str, client_secret: str) -> list[dict]:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=as_int(config.get("lookback_hours", 24), "lookback_hours"))
-    endpoint = os.environ.get("NAVER_SEARCH_ENDPOINT", "https://openapi.naver.com/v1/search/news.json")
+    endpoint = os.environ.get("NAVER_SEARCH_ENDPOINT", "https://naverapihub.apigw.ntruss.com/search/v1/news")
     if not endpoint.startswith("https://") or not (
         urlparse(endpoint).netloc in {"openapi.naver.com", "naverapihub.apigw.ntruss.com"}
     ):
