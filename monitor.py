@@ -94,6 +94,28 @@ def search_news(session: requests.Session, config: dict, client_id: str, client_
                 break
             resp = session.get(endpoint, params={"query": query, "display": page_size,
                   "start": start, "sort": "date"}, headers=headers, timeout=25)
+            if not resp.ok:
+                # 오류 원인만 출력하며 인증키 자체는 출력하지 않습니다.
+                try:
+                    payload = resp.json()
+                except (ValueError, requests.exceptions.JSONDecodeError):
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                detail = payload.get("error", {})
+                if not isinstance(detail, dict):
+                    detail = {}
+                code = detail.get("errorCode") or payload.get("errorCode") or payload.get("code") or "확인 불가"
+                message = detail.get("message") or payload.get("errorMessage") or payload.get("message") or ""
+                extra = detail.get("details") or payload.get("details") or ""
+                # 응답 텍스트에서 만일의 인증정보 노출을 방지합니다.
+                safe_message = (str(message) + " " + str(extra)).replace(client_id, "[MASKED]").replace(client_secret, "[MASKED]")
+                safe_message = safe_message[:240].replace("\n", " ")
+                print(f"[네이버 API 진단] HTTP {resp.status_code}; 오류코드={code}; 설명={safe_message}", file=sys.stderr)
+                if resp.status_code == 401:
+                    print("[안내] GitHub Secrets의 NAVER_CLIENT_ID/SECRET 확인 및 NAVER API HUB 이용신청 상태 점검이 필요합니다. 인증키 내용은 공유하지 마세요.", file=sys.stderr)
+                if client_id[:1] in ('\"', "'") or client_secret[:1] in ('\"', "'"):
+                    print("[안내] 인증키 앞에 따옴표가 포함된 것으로 보입니다. GitHub Secrets에 따옴표 없이 복사하세요.", file=sys.stderr)
             resp.raise_for_status()
             items = resp.json().get("items") or []
             any_new = False
