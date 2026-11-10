@@ -222,6 +222,8 @@ def send_telegram(session: requests.Session, bot_token: str, chat_id: str, text:
     response = session.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
                             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
                                   "link_preview_options": {"is_disabled": True}}, timeout=25)
+    if response.status_code != 200:
+    print("텔레그램 오류 상세:", response.text)
     response.raise_for_status()
     data = response.json()
     if not data.get("ok"):
