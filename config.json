@@ -1,9 +1,9 @@
 {
   "comment_threshold": 5,
   "lookback_hours": 24,
-  "page_size": 50,
-  "pages_per_query": 1,
-  "max_comment_checks": 200,
+  "page_size": 100,
+  "pages_per_query": 3,
+  "max_comment_checks": 1000,
   "max_alerts_per_run": 10,
   "queries": [
     "금융위원회",
