@@ -222,9 +222,6 @@ def send_telegram(session: requests.Session, bot_token: str, chat_id: str, text:
     response = session.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
                             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
                                   "link_preview_options": {"is_disabled": True}}, timeout=25)
-    
-    if response.status_code != 200:
-        print("텔레그램 오류 상세:", response.text)
     response.raise_for_status()
     data = response.json()
     if not data.get("ok"):
@@ -273,7 +270,7 @@ def main():
     if pending and successes == 0:
         raise RuntimeError("모든 댓글 수 조회 실패: 비공식 댓글 API 변경 또는 차단 가능성")
     print(f"댓글 확인 성공 {successes}건 / 실패 {failures}건 / 기준 충족 {len(qualifying)}건")
-    qualifying.sort(key=lambda pair: pair[1], reverse=True)
+    qualifying.sort(key=lambda pair: pair[0]["published"], reverse=True)
     for article, count in qualifying[:max_alerts]:
         message = alert_text(article, count, threshold)
         if dry_run:
