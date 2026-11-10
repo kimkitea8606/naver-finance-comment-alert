@@ -1,0 +1,75 @@
+name: Telegram Connection Diagnosis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check bot identity, incoming chat ID, and send test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, urllib.error
+
+          token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+          if not token or not chat_id:
+              raise SystemExit('ERROR: TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID Secret이 비어 있습니다.')
+
+          def api(method, payload=None):
+              # Never print the URL: it contains the bot token.
+              url = 'https://api.telegram.org/bot' + token + '/' + method
+              data = json.dumps(payload).encode() if payload is not None else None
+              req = urllib.request.Request(url, data=data, headers={'Content-Type':'application/json'} if data else {})
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  # Telegram's description is useful; the request URL contains a secret.
+                  try:
+                      body = json.loads(exc.read().decode('utf-8', 'replace'))
+                  except Exception:
+                      body = {}
+                  return {'ok': False, 'error_code': exc.code, 'description': body.get('description', 'HTTP error')}
+              except Exception as exc:
+                  return {'ok': False, 'description': type(exc).__name__}
+
+          me = api('getMe')
+          if not me.get('ok'):
+              raise SystemExit('BOT ERROR: ' + str(me.get('description')))
+          print('BOT:', '@' + str(me['result'].get('username', '(unknown)')))
+          print('CONFIGURED CHAT ID:', chat_id)
+
+          webhook = api('getWebhookInfo')
+          if webhook.get('ok') and webhook.get('result', {}).get('url'):
+              print('WARNING: Webhook is active; getUpdates cannot be used until webhook is removed. Do not remove it if another service uses this bot.')
+          else:
+              updates = api('getUpdates', {'limit': 100, 'timeout': 0, 'allowed_updates': ['message']})
+              if updates.get('ok'):
+                  private_chats = {}
+                  for item in updates.get('result', []):
+                      message = item.get('message') or {}
+                      chat = message.get('chat') or {}
+                      if chat.get('type') == 'private':
+                          private_chats[str(chat.get('id'))] = bool('테스트1234' in str(message.get('text', '')))
+                  if private_chats:
+                      print('PRIVATE CHAT IDS SEEN (ID, test message found):')
+                      for key, found in private_chats.items():
+                          print(' ', key, 'test message:', 'YES' if found else 'NO')
+                  else:
+                      print('NO UPDATES: Send a NEW message "테스트1234" directly to the bot, then rerun this workflow.')
+              else:
+                  print('getUpdates ERROR:', updates.get('description'))
+
+          result = api('sendMessage', {'chat_id': chat_id, 'text': '✅ 텔레그램 연결 진단 메시지입니다.'})
+          if result.get('ok'):
+              print('SEND TEST: SUCCESS. GitHub Chat ID and token can send messages.')
+          else:
+              print('SEND TEST: FAILED:', result.get('description'))
+              raise SystemExit(1)
+          PY
