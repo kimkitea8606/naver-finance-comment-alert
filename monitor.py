@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -228,13 +229,161 @@ def send_telegram(session: requests.Session, bot_token: str, chat_id: str, text:
         raise RuntimeError(f"텔레그램 전송 실패: {str(data)[:300]}")
 
 
-def alert_text(record: dict, count: int, threshold: int) -> str:
+
+
+# 금융정책·시장 관련 수치를 우선합니다. 단순 송고시각·날짜 표기는 가점하지 않습니다.
+FINANCIAL_NUMBER_RE = re.compile(
+    r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*"
+    r"(?:조\s*\d*\s*억?\s*원?|억\s*원|만원|원|%|％|퍼센트|%p|％p|bp|bps|"
+    r"명|건|개|가구|곳|개사|배|개월|년간|분기|억원|조원|달러|유로|엔|위안|"
+    r"기가와트|GW|MW|만\s*주|주|포인트|p)(?=\W|$)", re.I
+)
+DISPATCH_RE = re.compile(
+    r"(?:\b\d{1,2}시\s*\d{0,2}분?\b|\b\d{1,2}:\d{2}\b|"
+    r"\b(?:오전|오후)\s*\d{1,2}시|\b\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\b|"
+    r"\b\d{1,2}일\s*(?:오전|오후)?\s*\d{1,2}시)")
+DISPATCH_WORDS = ("송고", "입력", "수정", "기사입력", "최종수정", "기자 =", "기자=", "무단 전재", "재배포")
+FINANCIAL_CONTEXT = ("금융", "대출", "은행", "금리", "부채", "가계", "증권", "보험", "주가", "시장", "채권", "원화", "환율", "투자", "자본", "예산", "지원", "규제", "손실", "실적", "수익", "증가", "감소", "상승", "하락", "인하", "인상", "비율", "규모", "한도")
+
+
+def concise_summary(text: str, max_chars: int = 520) -> str:
+    """기사 원문에서 주요 수치가 포함된 문장 최대 3개를 발췌합니다.
+
+    수치 자체는 원문 그대로 유지하고, 본문에 없는 숫자·사실을 생성하지 않습니다.
+    기사 본문이 짧으면 3문장 미만일 수 있습니다.
+    """
+    text = html.unescape(re.sub(r"<[^>]*>", " ", text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "기사 본문 또는 검색 소개문을 확인할 수 없습니다."
+    # 마침표 뒤의 숫자(3.5%)에는 분리되지 않으며, 날짜·소수점 숫자는 보존합니다.
+    raw_sentences = re.split(r"(?<=[.!?。])\s+(?=[가-힣A-Za-z0-9\(\[\"“‘])", text)
+    candidates = []
+    for idx, sentence in enumerate(raw_sentences):
+        sentence = sentence.strip()
+        if len(sentence) < 18 or any(x in sentence for x in DISPATCH_WORDS):
+            continue
+        # 송고 시각이나 기자명만 실린 문장은 제외합니다.
+        scrubbed = DISPATCH_RE.sub("", sentence)
+        if len(scrubbed.strip(" ,.-()[]")) < 18:
+            continue
+        counts = len(FINANCIAL_NUMBER_RE.findall(sentence))
+        ctx = sum(1 for term in FINANCIAL_CONTEXT if term in sentence)
+        # 초반에 등장하는 핵심 개요 문장 + 수치가 있는 본문 문장 중심
+        score = min(counts, 3) * 5 + min(ctx, 4) * 0.9 + (3 if idx == 0 else 0) - idx * 0.025
+        if counts == 0 and idx >= 3:
+            score -= 2
+        candidates.append((idx, sentence, score, counts))
+    if not candidates:
+        return text[:max_chars].rstrip() + ("…" if len(text) > max_chars else "")
+
+    chosen = []
+    used = 0
+    # 앞부분의 핵심 맥락을 우선 포함하되, 다른 두 문장은 수치 중심으로 고릅니다.
+    context = next((c for c in candidates[:4] if c[2] >= 0 and len(c[1]) <= max_chars // 2), None)
+    if context is not None:
+        chosen.append(context)
+        used += len(context[1])
+    ranked = sorted((c for c in candidates if c not in chosen), key=lambda c: c[2], reverse=True)
+    for cand in ranked:
+        if len(chosen) >= 3:
+            break
+        if len(cand[1]) + used + 1 <= max_chars:
+            chosen.append(cand)
+            used += len(cand[1]) + 1
+    # 발췌된 문장은 원문 순서로 배열해서 맥락을 유지합니다.
+    chosen.sort(key=lambda c: c[0])
+    if not chosen:
+        return candidates[0][1][:max_chars].rstrip() + ("…" if len(candidates[0][1]) > max_chars else "")
+    return " ".join(c[1] for c in chosen)
+
+
+def get_article_source(session: requests.Session, record: dict) -> tuple[str, str]:
+    """공개된 기사 본문이 없을 경우 검색 소개문만 사용합니다."""
+    try:
+        resp = session.get(record["url"], timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        body = soup.select_one("#dic_area") or soup.select_one("#articeBody")
+        if body:
+            for elt in body.select("script, style, .end_photo_org, .byline_s, .article_journalist, .reporter_area"):
+                elt.decompose()
+            content = re.sub(r"\s+", " ", body.get_text(" ", strip=True)).strip()
+            if len(content) >= 120:
+                return content[:11000], "기사 본문"
+    except requests.RequestException as exc:
+        print(f"본문 조회 실패 {record['key']}: {type(exc).__name__}", file=sys.stderr)
+    return record.get("snippet", ""), "검색 소개문"
+
+
+def extract_response_text(payload: dict) -> str:
+    """Responses API의 output 텍스트만 안전하게 추출합니다."""
+    parts = []
+    for item in payload.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for piece in item.get("content", []):
+            if piece.get("type") == "output_text":
+                parts.append(piece.get("text", ""))
+    return "\n".join(parts).strip()
+
+
+def ai_summary(session: requests.Session, record: dict, api_key: str, model: str) -> tuple[str, str]:
+    content, source = get_article_source(session, record)
+    if not content.strip():
+        return "확인 가능한 기사 내용이 부족하여 요약하지 않았습니다.", "본문 부족"
+    instruction = (
+        "당신은 한국 금융정책·금융시장 뉴스 브리핑 담당자입니다. 입력된 기사 이외의 외부 지식은 사용하지 마세요. "
+        "한국어로 반드시 3개의 완결된 문장으로 요약하세요. 번호나 불릿 없이 한 문단으로 작성하세요. "
+        "1문장: 무엇이 발표되거나 발생했는지, 2문장: 본문에 명시된 핵심 금액·비율·증감폭·지원 규모·적용 대상 등, "
+        "3문장: 기사에 실제로 서술된 시장·금융회사·소비자 영향이나 쟁점. "
+        "중요 수치가 여러 개면 정책과 가장 직접 관련된 1~3개를 정확한 단위로 포함하세요. "
+        "송고/입력/수정시각, 기자명, 기사 번호, 주소, 단순 날짜는 핵심 수치로 취급하지 마세요. "
+        "실제 시행일, 발표된 기한 등 정책적으로 중요한 날짜는 필요한 경우만 포함하세요. "
+        "기사에 없는 숫자, 인과관계, 전망, 평가를 만들어내지 마세요. "
+        "숫자나 영향이 없으면 없다는 사실을 자연스럽게 표현하세요. "
+        "기사 본문 대신 검색 소개문만 있으면 확인된 내용으로만 간략히 서술하세요. "
+        "총 400자 이내로 쓰세요."
+    )
+    body = {
+        "model": model,
+        "instructions": instruction,
+        "input": f"기사제목: {record['title']}\n자료 종류: {source}\n기사내용:\n{content}",
+        "max_output_tokens": 850,
+        "store": False,
+    }
+    response = session.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=body, timeout=65,
+    )
+    if not response.ok:
+        # 보안상 API 키나 요청 본문은 출력하지 않습니다.
+        print(f"AI 요약 API HTTP {response.status_code}: {record['key']}", file=sys.stderr)
+        response.raise_for_status()
+    summary = extract_response_text(response.json()).strip()
+    if not summary:
+        raise RuntimeError("AI API가 요약문을 반환하지 않았습니다")
+    return summary[:420], f"AI 요약 · {source}"
+
+
+def article_summary(session: requests.Session, record: dict, api_key: str, model: str) -> tuple[str, str]:
+    try:
+        return ai_summary(session, record, api_key, model)
+    except (requests.RequestException, ValueError, RuntimeError) as exc:
+        print(f"AI 요약 실패 {record['key']}: {type(exc).__name__}; 기존 발췌 방식으로 대체", file=sys.stderr)
+        content, source = get_article_source(session, record)
+        return concise_summary(content, max_chars=450), f"AI 실패·{source} 발췌"
+
+def alert_text(record: dict, count: int, threshold: int, summary: str = "", summary_source: str = "") -> str:
     published = record["published"].astimezone(KST).strftime("%m/%d %H:%M")
     title = html.escape(record["title"])
     url = html.escape(record["url"], quote=True)
+    safe_summary = html.escape(summary[:450])
     return (f"🔔 <b>댓글 많은 금융뉴스</b>\n"
             f"💬 댓글 <b>{count:,}개</b> (기준 {threshold:,}개)\n"
             f"📰 {title}\n"
+            f"📝 <b>요약</b> ({html.escape(summary_source)}): {safe_summary}\n"
             f"🕘 게시 {published} (한국시간)\n"
             f"🔗 <a href=\"{url}\">기사 보기</a>")
 
@@ -249,6 +398,8 @@ def main():
     client_secret = get_env("NAVER_CLIENT_SECRET")
     bot_token = get_env("TELEGRAM_BOT_TOKEN") if not dry_run else ""
     chat_id = get_env("TELEGRAM_CHAT_ID") if not dry_run else ""
+    api_key = get_env("OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_MODEL", "gpt-6-luna")
     session = make_session()
     seen = clean_sent(load_sent())
     records = search_news(session, config, client_id, client_secret)
@@ -272,7 +423,8 @@ def main():
     print(f"댓글 확인 성공 {successes}건 / 실패 {failures}건 / 기준 충족 {len(qualifying)}건")
     qualifying.sort(key=lambda pair: pair[0]["published"], reverse=True)
     for article, count in qualifying[:max_alerts]:
-        message = alert_text(article, count, threshold)
+        summary, summary_source = article_summary(session, article, api_key, model)
+        message = alert_text(article, count, threshold, summary, summary_source)
         if dry_run:
             print("[DRY RUN]", re.sub(r"<[^>]+>", "", message))
         else:
