@@ -1,5 +1,5 @@
 {
-  "comment_threshold": 5,
+  "comment_threshold": 10,
   "lookback_hours": 24,
   "page_size": 100,
   "pages_per_query": 3,
