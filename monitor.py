@@ -298,12 +298,39 @@ def concise_summary(text: str, max_chars: int = 520) -> str:
     return " ".join(c[1] for c in chosen)
 
 
+def extract_publisher(soup: BeautifulSoup) -> str:
+    """네이버 기사 헤더의 언론사 표기를 우선 사용합니다 (기자명과 구분)."""
+    for selector in (
+        "a.media_end_head_top_logo img[alt]",
+        ".media_end_head_top_logo img[alt]",
+        "img.media_end_head_top_logo_img[alt]",
+    ):
+        node = soup.select_one(selector)
+        if node:
+            name = node.get("alt", "").strip()
+            if name and name not in {"언론사", "네이버 뉴스", "NAVER 뉴스"}:
+                return re.sub(r"\s+", " ", name)[:60]
+    logo = soup.select_one("a.media_end_head_top_logo, .media_end_head_top_logo")
+    if logo:
+        name = logo.get_text(" ", strip=True)
+        if name and name not in {"언론사", "네이버 뉴스", "NAVER 뉴스"}:
+            return re.sub(r"\s+", " ", name)[:60]
+    # 보조 메타데이터: 기자 이름 등과 혼동되지 않을 때만 사용합니다.
+    meta = soup.select_one('meta[property="og:article:author"]')
+    if meta:
+        name = (meta.get("content") or "").split(" | ")[0].strip()
+        if name and not any(marker in name for marker in ("기자", "네이버", "http", "@")):
+            return re.sub(r"\s+", " ", name)[:60]
+    return "언론사 확인 불가"
+
+
 def get_article_source(session: requests.Session, record: dict) -> tuple[str, str]:
     """공개된 기사 본문이 없을 경우 검색 소개문만 사용합니다."""
     try:
         resp = session.get(record["url"], timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
+        record["publisher"] = extract_publisher(soup)
         body = soup.select_one("#dic_area") or soup.select_one("#articeBody")
         if body:
             for elt in body.select("script, style, .end_photo_org, .byline_s, .article_journalist, .reporter_area"):
@@ -378,11 +405,13 @@ def article_summary(session: requests.Session, record: dict, api_key: str, model
 def alert_text(record: dict, count: int, threshold: int, summary: str = "", summary_source: str = "") -> str:
     published = record["published"].astimezone(KST).strftime("%m/%d %H:%M")
     title = html.escape(record["title"])
+    publisher = html.escape(record.get("publisher", "언론사 확인 불가"))
     url = html.escape(record["url"], quote=True)
     safe_summary = html.escape(summary[:450])
     return (f"🔔 <b>댓글 많은 금융뉴스</b>\n"
             f"💬 댓글 <b>{count:,}개</b> (기준 {threshold:,}개)\n"
             f"📰 {title}\n"
+            f"🏢 언론사: <b>{publisher}</b>\n"
             f"📝 <b>요약</b> ({html.escape(summary_source)}): {safe_summary}\n"
             f"🕘 게시 {published} (한국시간)\n"
             f"🔗 <a href=\"{url}\">기사 보기</a>")
